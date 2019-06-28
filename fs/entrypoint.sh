@@ -1,47 +1,54 @@
 #!/bin/bash
 set -Eeuo pipefail
 # For testing purposes, you can use -Eeuxo, but never commit with that as it can cause credential leakage in logs.
-
 # .pgpass format is "host:port:dbname:user:pass"
-
-# pg_dump -s -h pg1 -x -n public test | psql -h pg1 -d test2
-# bucardo add sync testsync dbs=test,test2 tables=test
-# bucardo activate testsync
-
-touch ~/.pgpass && chmod 600 ~/.pgpass && mkdir /var/log/bucardo && chmod 777 /var/log/bucardo
-
-ADMIN_CREDS=""
-BUCARDO_CREDS=""
-POSTGRES_PATH="/usr/lib/postgresql/10/bin/postgres"
+mkdir -p /var/log/bucardo && chmod 777 /var/log/bucardo
 
 start_postgres() {
     su postgres -c \
         'export PATH="$PATH:/usr/lib/postgresql/10/bin"
         initdb
-        pg_ctl -D "$PGDATA" -w start'
+        pg_ctl -w start'
+}
+
+sql() {
+    su postgres -c "psql -h $1 -c '$2;'"
 }
 
 bucardo_cmd() {
     su postgres -c "cd ~/ && bucardo $(echo -n $@)"
 }
 
+shutdown() {
+    PID=$(head -n 1 /tmp/bucardo.mcp.pid)
+    bucardo_cmd stop
+    tail --pid=$PID -f /dev/null
+    su postgres -c \
+        'export PATH="$PATH:/usr/lib/postgresql/10/bin"
+        pg_ctl -w stop'
+    exit 0
+}
+
 add_pgpass() {
-    su postgres -c "cd ~/ && echo $1 >> ~/.pgpass"
+    su postgres -c "echo $1 >> ~/.pgpass && chmod 600 ~/.pgpass"
 }
 
 make_db() {
-    su postgres -c "psql -h $1 -c 'CREATE DATABASE $2;'" || true
+    sql $1 "CREATE DATABASE $2" || true
 }
 
 copy_db() {
-    su postgres -c "pg_dump -s -h $1 -x -n public $2 | psql -h $3 -d $4" || true
+    su postgres -c "pg_dump -s -x -N bucardo -h $1 $2 | psql -h $3 -d $4" || true
 }
 
 start_postgres
-bucardo_cmd install --batch -U postgres -d postgres
+bucardo_cmd install --batch -U postgres -d postgres || bucardo_cmd upgrade
 
-while getopts p:s:c:m: o; do
+while getopts b:p:c:m: o; do
     case "$o" in
+    b)
+        bucardo_cmd $OPTARG
+        ;;
     c)
         dbs=($(echo -n "$OPTARG" | tr ">" "\n"))
         set1=($(echo -n "${dbs[0]}" | tr ":" "\n"))
@@ -55,16 +62,14 @@ while getopts p:s:c:m: o; do
     p)
         add_pgpass $OPTARG
         ;;
-    s)
-        sleep $OPTARG
-        ;;
     [?])
-        echo "Usage: $0 [-p pgpass entry] [-s sleep time] [-m newdbhost:newdbname] [-c fromdbhost:fromdbname>todbhost:todbname]" >&2
+        echo "Usage: $0 [-p 'pgpass entry'] [-m 'new db'] [-m 'newdbhost:newdbname'] [-c 'fromdbhost:fromdbname>todbhost:todbname']" >&2
         exit 1
         ;;
     esac
 done
 
 bucardo_cmd start
-
-exec /bin/bash
+trap 'shutdown' SIGINT SIGTERM
+TAIL_PID=$(head -n 1 /tmp/bucardo.mcp.pid)
+tail --pid=$TAIL_PID -f /var/log/bucardo/log.bucardo
