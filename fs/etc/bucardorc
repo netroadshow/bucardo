@@ -1,3 +1,3 @@
-dbport = 5432
+piddir = /tmp
 dbuser = bucardo
 dbname = bucardo
